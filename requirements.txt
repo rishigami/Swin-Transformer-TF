@@ -1,1 +1,2 @@
+numpy
 tensorflow>=2.4.1
