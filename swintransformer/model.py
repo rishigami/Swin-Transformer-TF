@@ -1,4 +1,4 @@
-import numpy
+import numpy as np
 import tensorflow as tf
 from tensorflow.keras.layers import Dense, Dropout, Conv2D, LayerNormalization, GlobalAveragePooling1D
 
