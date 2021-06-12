@@ -47,7 +47,7 @@ model = tf.keras.Sequential([
   tf.keras.layers.Dense(NUM_CLASSES, activation='softmax')
 ])
 ```
-
+Example: [TPU training on Kaggle](https://www.kaggle.com/rishigami/tpu-swin-transformer-tensorflow)
 ## Citation
 ```
 @article{liu2021Swin,
