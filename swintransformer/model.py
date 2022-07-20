@@ -1,6 +1,6 @@
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.layers import Dense, Dropout, Conv2D, LayerNormalization, GlobalAveragePooling1D
+from tensorflow.keras.layers import Dense, Dropout, Conv2D, Conv3D, LayerNormalization, GlobalAveragePooling1D
 
 CFGS = {
     'swin_tiny_224': dict(input_size=(224, 224), window_size=7, embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24]),
@@ -314,30 +314,56 @@ class BasicLayer(tf.keras.layers.Layer):
 class PatchEmbed(tf.keras.layers.Layer):
     def __init__(self, img_size=(224, 224), patch_size=(4, 4), in_chans=3, embed_dim=96, norm_layer=None):
         super().__init__(name='patch_embed')
-        patches_resolution = [img_size[0] //
-                              patch_size[0], img_size[1] // patch_size[1]]
+
+        assert len(img_size) == len(patch_size), "Image and patch dimensionality must match"
+
+        if len(img_size) == 3:
+            patches_resolution = [img_size[0] // patch_size[0], 
+                                  img_size[1] // patch_size[1],
+                                  img_size[2] // patch_size[2]]
+            self.num_patches = patches_resolution[0] * patches_resolution[1] * patches_resolution[2]
+        elif len(img_size) == 2:
+            patches_resolution = [img_size[0] //
+                                  patch_size[0], img_size[1] // patch_size[1]]
+            self.num_patches = patches_resolution[0] * patches_resolution[1]
         self.img_size = img_size
         self.patch_size = patch_size
         self.patches_resolution = patches_resolution
-        self.num_patches = patches_resolution[0] * patches_resolution[1]
-
+        
         self.in_chans = in_chans
         self.embed_dim = embed_dim
 
-        self.proj = Conv2D(embed_dim, kernel_size=patch_size,
+        if len(img_size) == 3:
+            self.proj = Conv3D(embed_dim, kernel_size=patch_size,
                            strides=patch_size, name='proj')
+        elif len(img_size) == 2:
+            self.proj = Conv2D(embed_dim, kernel_size=patch_size,
+                               strides=patch_size, name='proj')
+
         if norm_layer is not None:
             self.norm = norm_layer(epsilon=1e-5, name='norm')
         else:
             self.norm = None
 
     def call(self, x):
-        B, H, W, C = x.get_shape().as_list()
-        assert H == self.img_size[0] and W == self.img_size[1], \
-            f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-        x = self.proj(x)
-        x = tf.reshape(
-            x, shape=[-1, (H // self.patch_size[0]) * (W // self.patch_size[0]), self.embed_dim])
+
+        assert len(x.get_shape().as_list()) == len(self.img_size) + 2, "PatchEmbed built and called with different dimensionality"
+
+        if len(self.img_size) == 3:
+            B, H, W, D, C = x.get_shape().as_list()
+            assert H == self.img_size[0] and W == self.img_size[1] and D == self.img_size[2], \
+                f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]}*{self.img_size[2]})."
+            x = self.proj(x)
+            x = tf.reshape(
+                x, shape=[-1, (H // self.patch_size[0]) * (W // self.patch_size[0]) * (D // self.patch_size[0]), self.embed_dim])
+
+        elif len(self.img_size) == 2:
+            B, H, W, C = x.get_shape().as_list()
+            assert H == self.img_size[0] and W == self.img_size[1], \
+                f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+            x = self.proj(x)
+            x = tf.reshape(
+                x, shape=[-1, (H // self.patch_size[0]) * (W // self.patch_size[0]), self.embed_dim])
         if self.norm is not None:
             x = self.norm(x)
         return x
