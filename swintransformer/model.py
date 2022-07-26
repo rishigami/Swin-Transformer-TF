@@ -431,8 +431,8 @@ class BasicLayer(tf.keras.layers.Layer):
 
 
 class PatchEmbed(tf.keras.layers.Layer):
-    def __init__(self, img_size=(224, 224), patch_size=(4, 4), in_chans=3, embed_dim=96, norm_layer=None):
-        super().__init__(name='patch_embed')
+    def __init__(self, img_size=(224, 224), patch_size=(4, 4), in_chans=3, embed_dim=96, norm_layer=None, name='patch_embed'):
+        super().__init__(name=name)
 
         assert len(img_size) == len(patch_size), "Image and patch dimensionality must match"
 
