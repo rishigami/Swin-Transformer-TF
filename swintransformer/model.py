@@ -1,6 +1,6 @@
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.layers import Dense, Dropout, Conv2D, LayerNormalization, GlobalAveragePooling1D
+from tensorflow.keras.layers import Dense, Dropout, Conv2D, Conv3D, LayerNormalization, GlobalAveragePooling1D
 
 CFGS = {
     'swin_tiny_224': dict(input_size=(224, 224), window_size=7, embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24]),
@@ -31,11 +31,20 @@ class Mlp(tf.keras.layers.Layer):
 
 
 def window_partition(x, window_size):
-    B, H, W, C = x.get_shape().as_list()
-    x = tf.reshape(x, shape=[-1, H // window_size,
-                   window_size, W // window_size, window_size, C])
-    x = tf.transpose(x, perm=[0, 1, 3, 2, 4, 5])
-    windows = tf.reshape(x, shape=[-1, window_size, window_size, C])
+    if len(x.get_shape().as_list()) == 5:
+        B, H, W, D, C = x.get_shape().as_list()
+        x = tf.reshape(x, shape=[-1, 
+            H // window_size, window_size, 
+            W // window_size, window_size,
+            D // window_size, window_size, C])
+        x = tf.transpose(x, perm=[0, 1, 3, 5, 2, 4, 6, 7])
+        windows = tf.reshape(x, shape=[-1, window_size, window_size, window_size, C])
+    elif len(x.get_shape().as_list()) == 4:
+        B, H, W, C = x.get_shape().as_list()
+        x = tf.reshape(x, shape=[-1, H // window_size,
+                       window_size, W // window_size, window_size, C])
+        x = tf.transpose(x, perm=[0, 1, 3, 2, 4, 5])
+        windows = tf.reshape(x, shape=[-1, window_size, window_size, C])
     return windows
 
 
@@ -64,21 +73,43 @@ class WindowAttention(tf.keras.layers.Layer):
         self.proj_drop = Dropout(proj_drop)
 
     def build(self, input_shape):
-        self.relative_position_bias_table = self.add_weight(f'{self.prefix}/attn/relative_position_bias_table',
-                                                            shape=(
-                                                                (2 * self.window_size[0] - 1) * (2 * self.window_size[1] - 1), self.num_heads),
-                                                            initializer=tf.initializers.Zeros(), trainable=True)
+        if len(self.window_size) == 3:
+            self.relative_position_bias_table = self.add_weight(
+                f'{self.prefix}/attn/relative_position_bias_table',
+                shape=(
+                    (2 * self.window_size[0] - 1) * (2 * self.window_size[1] - 1) * (2 * self.window_size[2] - 1), self.num_heads),
+                initializer=tf.initializers.Zeros(), trainable=True)
 
-        coords_h = np.arange(self.window_size[0])
-        coords_w = np.arange(self.window_size[1])
-        coords = np.stack(np.meshgrid(coords_h, coords_w, indexing='ij'))
-        coords_flatten = coords.reshape(2, -1)
-        relative_coords = coords_flatten[:, :,
-                                         None] - coords_flatten[:, None, :]
-        relative_coords = relative_coords.transpose([1, 2, 0])
-        relative_coords[:, :, 0] += self.window_size[0] - 1
-        relative_coords[:, :, 1] += self.window_size[1] - 1
-        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+            coords_h = np.arange(self.window_size[0])
+            coords_w = np.arange(self.window_size[1])
+            coords_d = np.arange(self.window_size[2])
+            coords = np.stack(np.meshgrid(coords_h, coords_w, coords_d, indexing='ij'))
+            coords_flatten = coords.reshape(3, -1)
+            relative_coords = coords_flatten[:, :,
+                                             None] - coords_flatten[:, None, :]
+            relative_coords = relative_coords.transpose([1, 2, 0])
+            relative_coords[:, :, 0] += self.window_size[0] - 1
+            relative_coords[:, :, 1] += self.window_size[1] - 1
+            relative_coords[:, :, 2] += self.window_size[2] - 1
+            relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+            relative_coords[:, :, 1] *= 2 * self.window_size[2] - 1
+        elif len(self.window_size) == 2:
+            self.relative_position_bias_table = self.add_weight(
+                f'{self.prefix}/attn/relative_position_bias_table',
+                shape=(
+                    (2 * self.window_size[0] - 1) * (2 * self.window_size[1] - 1), self.num_heads),
+                initializer=tf.initializers.Zeros(), trainable=True)
+
+            coords_h = np.arange(self.window_size[0])
+            coords_w = np.arange(self.window_size[1])
+            coords = np.stack(np.meshgrid(coords_h, coords_w, indexing='ij'))
+            coords_flatten = coords.reshape(2, -1)
+            relative_coords = coords_flatten[:, :,
+                                             None] - coords_flatten[:, None, :]
+            relative_coords = relative_coords.transpose([1, 2, 0])
+            relative_coords[:, :, 0] += self.window_size[0] - 1
+            relative_coords[:, :, 1] += self.window_size[1] - 1
+            relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
         relative_position_index = relative_coords.sum(-1).astype(np.int64)
         self.relative_position_index = tf.Variable(initial_value=tf.convert_to_tensor(
             relative_position_index), trainable=False, name=f'{self.prefix}/attn/relative_position_index')
@@ -95,7 +126,7 @@ class WindowAttention(tf.keras.layers.Layer):
         relative_position_bias = tf.gather(self.relative_position_bias_table, tf.reshape(
             self.relative_position_index, shape=[-1]))
         relative_position_bias = tf.reshape(relative_position_bias, shape=[
-                                            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1])
+                                            N, N, -1])#self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1])
         relative_position_bias = tf.transpose(
             relative_position_bias, perm=[2, 0, 1])
         attn = attn + tf.expand_dims(relative_position_bias, axis=0)
@@ -161,8 +192,12 @@ class SwinTransformerBlock(tf.keras.layers.Layer):
         self.prefix = prefix
 
         self.norm1 = norm_layer(epsilon=1e-5, name=f'{self.prefix}/norm1')
-        self.attn = WindowAttention(dim, window_size=(self.window_size, self.window_size), num_heads=num_heads,
+        if len(self.input_resolution) == 3:
+            self.attn = WindowAttention(dim, window_size=(self.window_size, self.window_size, self.window_size), num_heads=num_heads,
                                     qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, prefix=self.prefix)
+        elif len(self.input_resolution) == 2:
+            self.attn = WindowAttention(dim, window_size=(self.window_size, self.window_size), num_heads=num_heads,
+                                        qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, prefix=self.prefix)
         self.drop_path = DropPath(
             drop_path_prob if drop_path_prob > 0. else 0.)
         self.norm2 = norm_layer(epsilon=1e-5, name=f'{self.prefix}/norm2')
@@ -172,24 +207,50 @@ class SwinTransformerBlock(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         if self.shift_size > 0:
-            H, W = self.input_resolution
-            img_mask = np.zeros([1, H, W, 1])
-            h_slices = (slice(0, -self.window_size),
-                        slice(-self.window_size, -self.shift_size),
-                        slice(-self.shift_size, None))
-            w_slices = (slice(0, -self.window_size),
-                        slice(-self.window_size, -self.shift_size),
-                        slice(-self.shift_size, None))
-            cnt = 0
-            for h in h_slices:
-                for w in w_slices:
-                    img_mask[:, h, w, :] = cnt
-                    cnt += 1
+            if len(self.input_resolution) == 3:
+                H, W, D = self.input_resolution
+                img_mask = np.zeros([1, H, W, D, 1])
+                h_slices = (slice(0, -self.window_size),
+                            slice(-self.window_size, -self.shift_size),
+                            slice(-self.shift_size, None))
+                w_slices = (slice(0, -self.window_size),
+                            slice(-self.window_size, -self.shift_size),
+                            slice(-self.shift_size, None))
+                d_slices = (slice(0, -self.window_size),
+                            slice(-self.window_size, -self.shift_size),
+                            slice(-self.shift_size, None))
 
-            img_mask = tf.convert_to_tensor(img_mask)
-            mask_windows = window_partition(img_mask, self.window_size)
-            mask_windows = tf.reshape(
-                mask_windows, shape=[-1, self.window_size * self.window_size])
+                cnt = 0
+                for h in h_slices:
+                    for w in w_slices:
+                        for d in d_slices:
+                            img_mask[:, h, w, d, :] = cnt
+                            cnt += 1
+
+                img_mask = tf.convert_to_tensor(img_mask)
+                mask_windows = window_partition(img_mask, self.window_size)
+                mask_windows = tf.reshape(
+                    mask_windows, shape=[-1, self.window_size * self.window_size * self.window_size])
+            elif len(self.input_resolution) == 2:
+                H, W = self.input_resolution
+                img_mask = np.zeros([1, H, W, 1])
+                h_slices = (slice(0, -self.window_size),
+                            slice(-self.window_size, -self.shift_size),
+                            slice(-self.shift_size, None))
+                w_slices = (slice(0, -self.window_size),
+                            slice(-self.window_size, -self.shift_size),
+                            slice(-self.shift_size, None))
+                cnt = 0
+                for h in h_slices:
+                    for w in w_slices:
+                        img_mask[:, h, w, :] = cnt
+                        cnt += 1
+
+                img_mask = tf.convert_to_tensor(img_mask)
+                mask_windows = window_partition(img_mask, self.window_size)
+                mask_windows = tf.reshape(
+                    mask_windows, shape=[-1, self.window_size * self.window_size])
+
             attn_mask = tf.expand_dims(
                 mask_windows, axis=1) - tf.expand_dims(mask_windows, axis=2)
             attn_mask = tf.where(attn_mask != 0, -100.0, attn_mask)
@@ -202,41 +263,80 @@ class SwinTransformerBlock(tf.keras.layers.Layer):
         self.built = True
 
     def call(self, x):
-        H, W = self.input_resolution
-        B, L, C = x.get_shape().as_list()
-        assert L == H * W, "input feature has wrong size"
+        if len(self.input_resolution) == 3:
+            H, W, D = self.input_resolution
+            B, L, C = x.get_shape().as_list()
+            assert L == H * W * D, "input feature has wrong size"
 
-        shortcut = x
-        x = self.norm1(x)
-        x = tf.reshape(x, shape=[-1, H, W, C])
+            shortcut = x
+            x = self.norm1(x)
+            x = tf.reshape(x, shape=[-1, H, W, D, C])
 
-        # cyclic shift
-        if self.shift_size > 0:
-            shifted_x = tf.roll(
-                x, shift=[-self.shift_size, -self.shift_size], axis=[1, 2])
-        else:
-            shifted_x = x
+            # cyclic shift
+            # TODO: if you want shift_size not 0, might have to be modified for 3D 
+            if self.shift_size > 0:
+                shifted_x = tf.roll(
+                    x, shift=[-self.shift_size, -self.shift_size], axis=[1, 2])
+            else:
+                shifted_x = x
 
-        # partition windows
-        x_windows = window_partition(shifted_x, self.window_size)
-        x_windows = tf.reshape(
-            x_windows, shape=[-1, self.window_size * self.window_size, C])
+            # partition windows
+            x_windows = window_partition(shifted_x, self.window_size)
+            x_windows = tf.reshape(
+                x_windows, shape=[-1, self.window_size * self.window_size * self.window_size, C])
 
-        # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)
+            # W-MSA/SW-MSA
+            attn_windows = self.attn(x_windows, mask=self.attn_mask)
 
-        # merge windows
-        attn_windows = tf.reshape(
-            attn_windows, shape=[-1, self.window_size, self.window_size, C])
-        shifted_x = window_reverse(attn_windows, self.window_size, H, W, C)
+            # merge windows
+            attn_windows = tf.reshape(
+                attn_windows, shape=[-1, self.window_size, self.window_size, C])
+            shifted_x = window_reverse(attn_windows, self.window_size, H, W, C)
 
-        # reverse cyclic shift
-        if self.shift_size > 0:
-            x = tf.roll(shifted_x, shift=[
-                        self.shift_size, self.shift_size], axis=[1, 2])
-        else:
-            x = shifted_x
-        x = tf.reshape(x, shape=[-1, H * W, C])
+            # reverse cyclic shift
+            if self.shift_size > 0:
+                x = tf.roll(shifted_x, shift=[
+                            self.shift_size, self.shift_size], axis=[1, 2])
+            else:
+                x = shifted_x
+            x = tf.reshape(x, shape=[-1, H * W * D, C])
+
+        elif len(self.input_resolution) == 2:
+            H, W = self.input_resolution
+            B, L, C = x.get_shape().as_list()
+            assert L == H * W, "input feature has wrong size"
+
+            shortcut = x
+            x = self.norm1(x)
+            x = tf.reshape(x, shape=[-1, H, W, C])
+
+            # cyclic shift
+            if self.shift_size > 0:
+                shifted_x = tf.roll(
+                    x, shift=[-self.shift_size, -self.shift_size], axis=[1, 2])
+            else:
+                shifted_x = x
+
+            # partition windows
+            x_windows = window_partition(shifted_x, self.window_size)
+            x_windows = tf.reshape(
+                x_windows, shape=[-1, self.window_size * self.window_size, C])
+
+            # W-MSA/SW-MSA
+            attn_windows = self.attn(x_windows, mask=self.attn_mask)
+
+            # merge windows
+            attn_windows = tf.reshape(
+                attn_windows, shape=[-1, self.window_size, self.window_size, C])
+            shifted_x = window_reverse(attn_windows, self.window_size, H, W, C)
+
+            # reverse cyclic shift
+            if self.shift_size > 0:
+                x = tf.roll(shifted_x, shift=[
+                            self.shift_size, self.shift_size], axis=[1, 2])
+            else:
+                x = shifted_x
+            x = tf.reshape(x, shape=[-1, H * W, C])
 
         # FFN
         x = shortcut + self.drop_path(x)
@@ -255,19 +355,38 @@ class PatchMerging(tf.keras.layers.Layer):
         self.norm = norm_layer(epsilon=1e-5, name=f'{prefix}/downsample/norm')
 
     def call(self, x):
-        H, W = self.input_resolution
-        B, L, C = x.get_shape().as_list()
-        assert L == H * W, "input feature has wrong size"
-        assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
+        if len(self.input_resolution) == 3:
+            H, W, D = self.input_resolution
+            B, L, C = x.get_shape().as_list()
+            assert L == H * W * D, "input feature has wrong size"
+            assert H % 2 == 0 and W % 2 == 0 and D % 2 == 0, f"x size ({H}*{W}*{D}) are not even."
 
-        x = tf.reshape(x, shape=[-1, H, W, C])
+            x = tf.reshape(x, shape=[-1, H, W, D, C])
 
-        x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
-        x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
-        x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
-        x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 C
-        x = tf.concat([x0, x1, x2, x3], axis=-1)
-        x = tf.reshape(x, shape=[-1, (H // 2) * (W // 2), 4 * C])
+            x0 = x[:, 0::2, 0::2, 0::2, :]
+            x1 = x[:, 1::2, 0::2, 0::2, :]
+            x2 = x[:, 0::2, 1::2, 0::2, :]
+            x3 = x[:, 0::2, 0::2, 1::2, :]
+            x4 = x[:, 1::2, 0::2, 1::2, :]
+            x5 = x[:, 0::2, 1::2, 0::2, :]
+            x6 = x[:, 0::2, 0::2, 1::2, :]
+            x7 = x[:, 1::2, 1::2, 1::2, :]
+            x = tf.concat([x0, x1, x2, x3, x4, x5, x6, x7], axis=-1)
+            x = tf.reshape(x, shape=[-1, (H // 2) * (W // 2) * (D // 2), 4 * C])
+        elif len(self.input_resolution) == 2:
+            H, W = self.input_resolution
+            B, L, C = x.get_shape().as_list()
+            assert L == H * W, "input feature has wrong size"
+            assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
+
+            x = tf.reshape(x, shape=[-1, H, W, C])
+
+            x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
+            x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
+            x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
+            x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 C
+            x = tf.concat([x0, x1, x2, x3], axis=-1)
+            x = tf.reshape(x, shape=[-1, (H // 2) * (W // 2), 4 * C])
 
         x = self.norm(x)
         x = self.reduction(x)
@@ -312,32 +431,58 @@ class BasicLayer(tf.keras.layers.Layer):
 
 
 class PatchEmbed(tf.keras.layers.Layer):
-    def __init__(self, img_size=(224, 224), patch_size=(4, 4), in_chans=3, embed_dim=96, norm_layer=None):
-        super().__init__(name='patch_embed')
-        patches_resolution = [img_size[0] //
-                              patch_size[0], img_size[1] // patch_size[1]]
+    def __init__(self, img_size=(224, 224), patch_size=(4, 4), in_chans=3, embed_dim=96, norm_layer=None, name='patch_embed'):
+        super().__init__(name=name)
+
+        assert len(img_size) == len(patch_size), "Image and patch dimensionality must match"
+
+        if len(img_size) == 3:
+            patches_resolution = [img_size[0] // patch_size[0], 
+                                  img_size[1] // patch_size[1],
+                                  img_size[2] // patch_size[2]]
+            self.num_patches = patches_resolution[0] * patches_resolution[1] * patches_resolution[2]
+        elif len(img_size) == 2:
+            patches_resolution = [img_size[0] //
+                                  patch_size[0], img_size[1] // patch_size[1]]
+            self.num_patches = patches_resolution[0] * patches_resolution[1]
         self.img_size = img_size
         self.patch_size = patch_size
         self.patches_resolution = patches_resolution
-        self.num_patches = patches_resolution[0] * patches_resolution[1]
-
+        
         self.in_chans = in_chans
         self.embed_dim = embed_dim
 
-        self.proj = Conv2D(embed_dim, kernel_size=patch_size,
+        if len(img_size) == 3:
+            self.proj = Conv3D(embed_dim, kernel_size=patch_size,
                            strides=patch_size, name='proj')
+        elif len(img_size) == 2:
+            self.proj = Conv2D(embed_dim, kernel_size=patch_size,
+                               strides=patch_size, name='proj')
+
         if norm_layer is not None:
             self.norm = norm_layer(epsilon=1e-5, name='norm')
         else:
             self.norm = None
 
     def call(self, x):
-        B, H, W, C = x.get_shape().as_list()
-        assert H == self.img_size[0] and W == self.img_size[1], \
-            f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-        x = self.proj(x)
-        x = tf.reshape(
-            x, shape=[-1, (H // self.patch_size[0]) * (W // self.patch_size[0]), self.embed_dim])
+
+        assert len(x.get_shape().as_list()) == len(self.img_size) + 2, "PatchEmbed built and called with different dimensionality"
+
+        if len(self.img_size) == 3:
+            B, H, W, D, C = x.get_shape().as_list()
+            assert H == self.img_size[0] and W == self.img_size[1] and D == self.img_size[2], \
+                f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]}*{self.img_size[2]})."
+            x = self.proj(x)
+            x = tf.reshape(
+                x, shape=[-1, (H // self.patch_size[0]) * (W // self.patch_size[0]) * (D // self.patch_size[0]), self.embed_dim])
+
+        elif len(self.img_size) == 2:
+            B, H, W, C = x.get_shape().as_list()
+            assert H == self.img_size[0] and W == self.img_size[1], \
+                f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+            x = self.proj(x)
+            x = tf.reshape(
+                x, shape=[-1, (H // self.patch_size[0]) * (W // self.patch_size[0]), self.embed_dim])
         if self.norm is not None:
             x = self.norm(x)
         return x
@@ -384,9 +529,11 @@ class SwinTransformerModel(tf.keras.Model):
         dpr = [x for x in np.linspace(0., drop_path_rate, sum(depths))]
 
         # build layers
-        self.basic_layers = tf.keras.Sequential([BasicLayer(dim=int(embed_dim * 2 ** i_layer),
+        if len(img_size) == 3:
+            self.basic_layers = tf.keras.Sequential([BasicLayer(dim=int(embed_dim * 2 ** i_layer),
                                                 input_resolution=(patches_resolution[0] // (2 ** i_layer),
-                                                                  patches_resolution[1] // (2 ** i_layer)),
+                                                                  patches_resolution[1] // (2 ** i_layer),
+                                                                  patches_resolution[2] // (2 ** i_layer)),
                                                 depth=depths[i_layer],
                                                 num_heads=num_heads[i_layer],
                                                 window_size=window_size,
@@ -400,6 +547,24 @@ class SwinTransformerModel(tf.keras.Model):
                                                     i_layer < self.num_layers - 1) else None,
                                                 use_checkpoint=use_checkpoint,
                                                 prefix=f'layers{i_layer}') for i_layer in range(self.num_layers)])
+
+        elif len(img_size) == 2:
+            self.basic_layers = tf.keras.Sequential([BasicLayer(dim=int(embed_dim * 2 ** i_layer),
+                                                    input_resolution=(patches_resolution[0] // (2 ** i_layer),
+                                                                      patches_resolution[1] // (2 ** i_layer)),
+                                                    depth=depths[i_layer],
+                                                    num_heads=num_heads[i_layer],
+                                                    window_size=window_size,
+                                                    mlp_ratio=self.mlp_ratio,
+                                                    qkv_bias=qkv_bias, qk_scale=qk_scale,
+                                                    drop=drop_rate, attn_drop=attn_drop_rate,
+                                                    drop_path_prob=dpr[sum(depths[:i_layer]):sum(
+                                                        depths[:i_layer + 1])],
+                                                    norm_layer=norm_layer,
+                                                    downsample=PatchMerging if (
+                                                        i_layer < self.num_layers - 1) else None,
+                                                    use_checkpoint=use_checkpoint,
+                                                    prefix=f'layers{i_layer}') for i_layer in range(self.num_layers)])
         self.norm = norm_layer(epsilon=1e-5, name='norm')
         self.avgpool = GlobalAveragePooling1D()
         if self.include_top:
@@ -412,7 +577,6 @@ class SwinTransformerModel(tf.keras.Model):
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
-
         x = self.basic_layers(x)
         x = self.norm(x)
         x = self.avgpool(x)
